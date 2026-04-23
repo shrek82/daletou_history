@@ -77,6 +77,19 @@ let json = serde_json::to_string_pretty(&record)?;
 println!("{}", json);
 ```
 
+### 自定义请求间隔
+
+默认请求间隔为 2 秒，可通过构造器调整：
+
+```rust
+use std::time::Duration;
+
+let client = Client::new()
+    .with_request_interval(Duration::from_secs(5));  // 改为 5 秒
+```
+
+`get_pages` 和 `get_latest_n` 在页间自动等待，防止被封。
+
 ## API 文档
 
 | 方法 | 参数 | 返回值 | 说明 |

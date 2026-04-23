@@ -1,9 +1,16 @@
 use encoding_rs::Encoding;
 use reqwest::blocking::Client as HttpClient;
 use scraper::{Html, Selector};
+use std::time::Duration;
 
 use crate::error::DaletouError;
 use crate::types::{BallSet, DrawPage, DrawRecord};
+
+/// 每页固定约 30 条记录
+const RECORDS_PER_PAGE: usize = 30;
+
+/// 默认请求间隔
+const DEFAULT_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 
 /// GB18030 编码（兼容 GB2312）
 const GB2312: &'static Encoding = encoding_rs::GB18030;
@@ -38,10 +45,12 @@ pub struct Client {
     http: HttpClient,
     base_url: String,
     selectors: Selectors,
+    /// 两次请求之间的最小间隔，防止被封
+    request_interval: Duration,
 }
 
 impl Client {
-    /// 创建新客户端
+    /// 创建新客户端（默认请求间隔 2 秒）
     pub fn new() -> Self {
         Self {
             http: HttpClient::builder()
@@ -50,7 +59,14 @@ impl Client {
                 .expect("构建 HTTP 客户端失败"),
             base_url: "https://www.cjcp.cn".to_string(),
             selectors: Selectors::new(),
+            request_interval: DEFAULT_REQUEST_INTERVAL,
         }
+    }
+
+    /// 设置请求间隔（防封策略）
+    pub fn with_request_interval(mut self, interval: Duration) -> Self {
+        self.request_interval = interval;
+        self
     }
 
     /// 获取最新一期开奖信息（第1页第一条）
@@ -87,16 +103,19 @@ impl Client {
         Ok(records)
     }
 
-    /// 收集多页记录的内部方法
+    /// 收集多页记录的内部方法，页间自动等待
     fn collect_records(
         &self,
         first_page: DrawPage,
         range: std::ops::RangeInclusive<u32>,
     ) -> Result<Vec<DrawRecord>, DaletouError> {
+        let remaining_pages = range.end().saturating_sub(*range.start()) as usize;
         let mut records = first_page.records;
-        records.reserve(range.end().saturating_sub(*range.start()) as usize * 30);
+        records.reserve(remaining_pages * RECORDS_PER_PAGE);
 
         for page in range {
+            // 页间延迟，防止被封
+            std::thread::sleep(self.request_interval);
             let p = self.get_page(page)?;
             records.extend(p.records);
         }
@@ -128,26 +147,34 @@ impl Client {
         let doc = Html::parse_document(html);
         let s = &self.selectors;
 
-        let mut records = Vec::new();
+        let mut records = Vec::with_capacity(RECORDS_PER_PAGE);
 
         for line in doc.select(&s.line) {
             // 期号: 从 "大乐透第2026043期开奖结果" 提取数字
-            let issue = extract_issue(&element_text(&line, &s.qs));
+            let issue = element_text(&line, &s.qs)
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect();
 
             // 日期和星期: "2026-04-22(三)"
-            let (date, weekday) = parse_date_weekday(&element_text(&line, &s.date));
+            let date_text = element_text(&line, &s.date);
+            let (date, weekday) = parse_date_weekday(&date_text);
 
-            // 红球
-            let red: Vec<u8> = line
-                .select(&s.red_ball)
-                .filter_map(|el| parse_number(&el))
-                .collect();
+            // 红球 (5个)
+            let mut red = Vec::with_capacity(5);
+            for el in line.select(&s.red_ball) {
+                if let Some(n) = parse_number(&el) {
+                    red.push(n);
+                }
+            }
 
-            // 蓝球
-            let blue: Vec<u8> = line
-                .select(&s.blue_ball)
-                .filter_map(|el| parse_number(&el))
-                .collect();
+            // 蓝球 (2个)
+            let mut blue = Vec::with_capacity(2);
+            for el in line.select(&s.blue_ball) {
+                if let Some(n) = parse_number(&el) {
+                    blue.push(n);
+                }
+            }
 
             // 奖池
             let prize_pool = element_text(&line, &s.money);
@@ -191,11 +218,6 @@ fn parse_number(el: &scraper::ElementRef) -> Option<u8> {
     el.text().next()?.trim().parse().ok()
 }
 
-/// 从 "大乐透第2026043期开奖结果" 提取期号 "2026043"
-fn extract_issue(text: &str) -> String {
-    text.chars().filter(|c| c.is_ascii_digit()).collect()
-}
-
 /// 解析 "2026-04-22(三)" 为 ("2026-04-22", "三")
 fn parse_date_weekday(text: &str) -> (String, String) {
     let text = text.trim();
@@ -213,7 +235,6 @@ fn parse_total_pages(doc: &Html, sel: &Selector) -> Option<u32> {
         .first_child()
         .and_then(|n| n.value().as_text())?;
 
-    // 文本格式如 "2/96"，提取斜杠后的数字
     text.find('/')
         .map(|pos| text[pos + 1..].trim())
         .and_then(|after| after.chars().take_while(|&c| c.is_ascii_digit()).collect::<String>().parse().ok())
