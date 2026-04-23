@@ -1,10 +1,10 @@
 [package]
 name = "daletou"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "大乐透开奖信息查询，支持实时开奖和历史开奖记录"
 license = "MIT"
-repository = "https://github.com/your-repo/daletou"
+repository = "https://github.com/shrek82/daletou_history.git"
 
 [dependencies]
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
