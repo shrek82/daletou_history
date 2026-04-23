@@ -19,43 +19,105 @@ const WEIGHT_RECENT20: f64 = 3.0;
 const WEIGHT_RECENT50: f64 = 2.0;
 const WEIGHT_ALL: f64 = 1.0;
 
+/// 计算方案评分（0-100）
+fn score_pick(pick: &Pick, stats: &Stats) -> f64 {
+    let red_score = score_red_pick(pick, stats);
+    let blue_score = score_blue_pick(pick, stats);
+    red_score * 0.8 + blue_score * 0.2
+}
+
+/// 红球评分
+fn score_red_pick(pick: &Pick, stats: &Stats) -> f64 {
+    let mut score = 0.0;
+
+    // 奇偶比匹配（20%）
+    let odd_count = pick.red.iter().filter(|&&n| n % 2 == 1).count() as f64 / RED_COUNT as f64;
+    let odd_deviation = (odd_count - stats.odd_ratio).abs();
+    score += (1.0 - odd_deviation) * 20.0;
+
+    // 大小比匹配（20%）
+    let big_count = pick.red.iter().filter(|&&n| n >= 18).count() as f64 / RED_COUNT as f64;
+    let big_deviation = (big_count - stats.big_ratio).abs();
+    score += (1.0 - big_deviation) * 20.0;
+
+    // 和值匹配（20%）
+    let sum = pick.red.iter().map(|&n| n as f64).sum::<f64>();
+    let sum_deviation = (sum - stats.sum_avg).abs() / stats.sum_stddev.max(0.001);
+    let sum_score = (1.0 - (sum_deviation / 2.0).min(1.0)).max(0.0);
+    score += sum_score * 20.0;
+
+    // 区间分布匹配（20%）
+    let mut zones = [0f64; 3];
+    for &n in &pick.red {
+        if n <= ZONE1_END { zones[0] += 1.0; }
+        else if n <= ZONE2_END { zones[1] += 1.0; }
+        else { zones[2] += 1.0; }
+    }
+    let total = zones.iter().sum::<f64>().max(0.001);
+    for v in zones.iter_mut() { *v /= total; }
+
+    let total_zone = stats.zone_avg.iter().sum::<f64>().max(0.001);
+    let expected = [
+        stats.zone_avg[0] / total_zone,
+        stats.zone_avg[1] / total_zone,
+        stats.zone_avg[2] / total_zone,
+    ];
+    let zone_deviation: f64 = zones.iter().zip(expected.iter()).map(|(a, b)| (a - b).abs()).sum();
+    let zone_score = (1.0 - zone_deviation).max(0.0);
+    score += zone_score * 20.0;
+
+    score
+}
+
+/// 蓝球评分
+fn score_blue_pick(pick: &Pick, stats: &Stats) -> f64 {
+    let mut score = 0.0;
+
+    // 奇偶匹配（50%）
+    let odd_count = pick.blue.iter().filter(|&&n| n % 2 == 1).count();
+    let odd_even_score = if odd_count == 1 { 1.0 } else { 0.5 };
+    score += odd_even_score * 50.0;
+
+    // 加权得分归一化（50%）
+    let blue_total: f64 = pick.blue.iter().map(|&n| stats.blue_weighted.get(&n).copied().unwrap_or(0.0)).sum();
+    let max_possible = stats.blue_weighted.values().copied().fold(0.0f64, f64::max) * BLUE_COUNT as f64;
+    if max_possible > 0.0 {
+        score += (blue_total / max_possible) * 50.0;
+    }
+
+    score
+}
+
 fn main() {
     let cache_path = PathBuf::from("/tmp/daletou_cache.json");
 
     let client = Client::new()
         .with_cache_path(cache_path)
-        .with_cache_ttl(Duration::from_secs(86400)) // 缓存24小时
+        .with_cache_ttl(Duration::from_secs(86400))
         .with_request_interval(Duration::from_secs(2));
 
-    // 获取最近 300 条记录（约需 10 页）
     println!("正在获取最近 300 期开奖数据...");
     let records = match client.get_cached_records(300) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("获取数据失败: {}", e);
-            return;
-        }
+        Err(e) => { eprintln!("获取数据失败: {}", e); return; }
     };
     println!("成功获取 {} 条记录\n", records.len());
 
-    // 分析数据
     let stats = analyze(&records);
-
-    // 展示分析结果
     print_analysis(&stats, &records);
 
-    // 生成推荐号码
-    println!("\n===== AI 推荐号码 =====");
     let picks = generate_picks(&stats);
+
+    println!("\n===== AI 推荐方案（6组）=====");
+    println!("  方案  红球            蓝球    评分  标签");
+
     for (i, pick) in picks.iter().enumerate() {
-        print!("方案 {}: ", i + 1);
-        for n in &pick.red {
-            print!("{:02} ", n);
-        }
-        print!("+ ");
-        for n in &pick.blue {
-            print!("{:02} ", n);
-        }
+        let score = score_pick(pick, &stats);
+        print!("  {:>4}  ", i + 1);
+        for n in &pick.red { print!("{:02} ", n); }
+        print!(" + ");
+        for n in &pick.blue { print!("{:02} ", n); }
+        print!("  {:>5.1}  {}", score, pick.label);
         println!();
     }
 }
@@ -64,11 +126,13 @@ fn main() {
 struct Stats {
     /// 红球全量频率
     red_freq: HashMap<u8, u32>,
-    /// 蓝球全量频率
+    /// 蓝球全量频率（预留）
+    #[allow(dead_code)]
     blue_freq: HashMap<u8, u32>,
     /// 红球各窗口频率 [近10, 近20, 近50]
     red_window_freq: [HashMap<u8, u32>; 3],
-    /// 蓝球各窗口频率 [近10, 近20, 近50]
+    /// 蓝球各窗口频率 [近10, 近20, 近50]（预留）
+    #[allow(dead_code)]
     blue_window_freq: [HashMap<u8, u32>; 3],
     /// 红球加权得分（近10期x5 + 近20期x3 + 近50期x2 + 全量x1）
     red_weighted: HashMap<u8, f64>,
@@ -99,6 +163,7 @@ struct Stats {
 struct Pick {
     red: Vec<u8>,
     blue: Vec<u8>,
+    label: &'static str,
 }
 
 fn analyze(records: &[DrawRecord]) -> Stats {
@@ -312,148 +377,311 @@ fn sorted_by_freq(freq: &HashMap<u8, u32>, n: usize) -> Vec<u8> {
 fn print_analysis(stats: &Stats, records: &[DrawRecord]) {
     println!("===== 数据分析（{} 期）=====", records.len());
 
-    // 红球频率 TOP 10
-    println!("\n红球出现频率 TOP 10:");
-    let mut red_sorted: Vec<(u8, u32)> = stats.red_freq.iter()
-        .map(|(&k, &v)| (k, v))
-        .collect();
-    red_sorted.sort_by_key(|&(_, v)| -(v as i32));
-    for (i, (ball, count)) in red_sorted.iter().take(10).enumerate() {
-        let pct = *count as f64 / records.len() as f64 * 100.0;
-        println!("  {:2}. {:02} 出现 {:3} 次 ({:.1}%)", i + 1, ball, count, pct);
+    // 红球综合排名 TOP 10
+    println!("\n红球综合排名（按加权得分）");
+    println!("  排名 号码  总分  全量  近50  近20  近10  遗漏");
+    println!("  ---- ---- ---- ---- ---- ---- ---- ----");
+
+    let mut red_sorted: Vec<(u8, f64)> = stats.red_weighted.iter()
+        .map(|(&k, &v)| (k, v)).collect();
+    red_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
+
+    for (i, (ball, score)) in red_sorted.iter().take(10).enumerate() {
+        let total = stats.red_freq.get(ball).copied().unwrap_or(0);
+        let freq50 = stats.red_window_freq[2].get(ball).copied().unwrap_or(0);
+        let freq20 = stats.red_window_freq[1].get(ball).copied().unwrap_or(0);
+        let freq10 = stats.red_window_freq[0].get(ball).copied().unwrap_or(0);
+        let omission = stats.red_omission[*ball as usize - 1];
+        println!("  {:>4} {:02}  {:>4.1} {:>4} {:>4} {:>4} {:>4} {:>4}",
+            i + 1, ball, score, total, freq50, freq20, freq10, omission);
     }
 
-    // 蓝球频率
-    println!("\n蓝球出现频率:");
-    let mut blue_sorted: Vec<(u8, u32)> = stats.blue_freq.iter()
-        .map(|(&k, &v)| (k, v))
-        .collect();
-    blue_sorted.sort_by_key(|&(_, v)| -(v as i32));
-    for (i, (ball, count)) in blue_sorted.iter().enumerate() {
-        let pct = *count as f64 / records.len() as f64 * 100.0;
-        println!("  {:2}. {:02} 出现 {:3} 次 ({:.1}%)", i + 1, ball, count, pct);
-    }
+    // 区间分布
+    println!("\n红球区间分布");
+    println!("  区域  范围    均出现  占比");
+    let total_zone: f64 = stats.zone_avg.iter().sum();
+    println!("  一区  01-12  {:>5.1} {:>5.1}%",
+        stats.zone_avg[0], stats.zone_avg[0] / total_zone * 100.0);
+    println!("  二区  13-24  {:>5.1} {:>5.1}%",
+        stats.zone_avg[1], stats.zone_avg[1] / total_zone * 100.0);
+    println!("  三区  25-35  {:>5.1} {:>5.1}%",
+        stats.zone_avg[2], stats.zone_avg[2] / total_zone * 100.0);
 
-    // 热号
-    println!("\n近期热号（近50期）:");
-    print!("  红球: ");
-    for n in &stats.red_hot { print!("{:02} ", n); }
-    print!("\n  蓝球: ");
-    for n in &stats.blue_hot { print!("{:02} ", n); }
-    println!();
-
-    // 冷号
-    println!("\n冷门号码（近100期未出现）:");
-    print!("  红球: ");
-    if stats.red_cold.is_empty() {
-        print!("无");
-    } else {
-        for n in &stats.red_cold { print!("{:02} ", n); }
-    }
-    print!("\n  蓝球: ");
-    if stats.blue_cold.is_empty() {
-        print!("无");
-    } else {
-        for n in &stats.blue_cold { print!("{:02} ", n); }
-    }
-    println!();
-
-    // 奇偶比
-    println!("\n奇偶比: 奇数 {:.1}% / 偶数 {:.1}%",
-        stats.odd_even_ratio * 100.0,
-        (1.0 - stats.odd_even_ratio) * 100.0);
-
-    // 大小比
-    println!("大小比: 大(18-35) {:.1}% / 小(1-17) {:.1}%",
-        stats.big_small_ratio * 100.0,
-        (1.0 - stats.big_small_ratio) * 100.0);
+    // 和值、连号、同尾
+    println!("\n和值分布: 均值 {:.1}  标准差 {:.1}  常见范围: {:.0}-{:.0}",
+        stats.sum_avg, stats.sum_stddev,
+        stats.sum_avg - stats.sum_stddev * 0.5,
+        stats.sum_avg + stats.sum_stddev * 0.5);
+    println!("连号出现率: {:.1}%", stats.consecutive_rate * 100.0);
+    println!("同尾分析: 平均 {:.1} 个同尾重复/期", stats.avg_tail_duplicates);
 }
 
 /// 生成多组推荐号码
 fn generate_picks(stats: &Stats) -> Vec<Pick> {
-    let mut picks = Vec::new();
+    let mut picks = Vec::with_capacity(6);
 
-    // 方案1: 热号组合
-    let mut red1 = stats.red_hot.iter().take(RED_COUNT).cloned().collect::<Vec<_>>();
-    red1.sort();
-    let mut blue1 = stats.blue_hot.iter().take(BLUE_COUNT).cloned().collect::<Vec<_>>();
-    blue1.sort();
-    if red1.len() == RED_COUNT {
-        picks.push(Pick { red: red1, blue: blue1 });
+    // 方案1: 纯加权热号
+    let red1 = pick_by_weighted_top(&stats.red_weighted, RED_COUNT);
+    let blue1 = pick_by_weighted_top(&stats.blue_weighted, BLUE_COUNT);
+    picks.push(Pick { red: red1, blue: blue1, label: "纯热号" });
+
+    // 方案2: 冷热混合（3热 + 2冷）
+    let red2 = pick_hot_cold_mix(&stats.red_weighted, &stats.red_omission, 3, 2);
+    let blue2 = pick_blue_hot_cold(&stats.blue_weighted, &stats.blue_omission);
+    picks.push(Pick { red: red2, blue: blue2, label: "冷热混合" });
+
+    // 方案3: 区间均衡
+    let red3 = pick_by_zone(&stats.red_weighted, stats.zone_avg);
+    let blue3 = pick_blue_odd_even(&stats.blue_weighted);
+    picks.push(Pick { red: red3, blue: blue3, label: "区间均衡" });
+
+    // 方案4: 和值约束
+    let red4 = pick_by_sum_constraint(&stats.red_weighted, stats.sum_avg, stats.sum_stddev);
+    let blue4 = pick_by_weighted_top(&stats.blue_weighted, BLUE_COUNT);
+    picks.push(Pick { red: red4, blue: blue4, label: "和值约束" });
+
+    // 方案5: 同尾约束
+    let red5 = pick_by_tail_constraint(&stats.red_weighted);
+    let blue5 = pick_blue_different_tail(&stats.blue_weighted);
+    picks.push(Pick { red: red5, blue: blue5, label: "同尾约束" });
+
+    // 方案6: 连号策略
+    let red6 = pick_by_consecutive(&stats.red_weighted);
+    let blue6 = pick_blue_hot(&stats.blue_weighted, &stats.blue_recent_hot);
+    picks.push(Pick { red: red6, blue: blue6, label: "连号策略" });
+
+    picks
+}
+
+/// 按加权得分TOP N选号
+fn pick_by_weighted_top(weighted: &HashMap<u8, f64>, count: usize) -> Vec<u8> {
+    let mut items: Vec<(u8, f64)> = weighted.iter().map(|(&k, &v)| (k, v)).collect();
+    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
+    items.into_iter().take(count).map(|(k, _)| k).collect()
+}
+
+/// 冷热混合：hot_count个高加权 + cold_count个高遗漏
+fn pick_hot_cold_mix(weighted: &HashMap<u8, f64>, omission: &[u32],
+                      hot_count: usize, cold_count: usize) -> Vec<u8> {
+    let hot = pick_by_weighted_top(weighted, hot_count);
+    let mut omission_items: Vec<(u8, u32)> = omission.iter().enumerate()
+        .map(|(i, &v)| (i as u8 + 1, v))
+        .filter(|(n, _)| !hot.contains(n))
+        .collect();
+    omission_items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut cold: Vec<u8> = omission_items.into_iter().take(cold_count).map(|(k, _)| k).collect();
+
+    let mut result = hot;
+    result.append(&mut cold);
+
+    // 不足时用加权补足
+    while result.len() < hot_count + cold_count {
+        let top = pick_by_weighted_top(weighted, result.len() + 1);
+        for n in top { if !result.contains(&n) { result.push(n); break; } }
+    }
+    result.truncate(hot_count + cold_count);
+    result.sort();
+    result
+}
+
+/// 蓝球：1高加权 + 1高遗漏
+fn pick_blue_hot_cold(weighted: &HashMap<u8, f64>, omission: &[u32]) -> Vec<u8> {
+    let hot = pick_by_weighted_top(weighted, 1);
+    let mut omission_items: Vec<(u8, u32)> = omission.iter().enumerate()
+        .map(|(i, &v)| (i as u8 + 1, v))
+        .filter(|(n, _)| !hot.contains(n))
+        .collect();
+    omission_items.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut cold: Vec<u8> = omission_items.into_iter().take(1).map(|(k, _)| k).collect();
+
+    let mut result = hot;
+    result.append(&mut cold);
+    while result.len() < 2 {
+        for i in 1..=BLUE_MAX { if !result.contains(&i) { result.push(i); break; } }
+    }
+    result.sort();
+    result
+}
+
+/// 区间均衡：按历史比例分配
+fn pick_by_zone(weighted: &HashMap<u8, f64>, zone_avg: [f64; 3]) -> Vec<u8> {
+    let total_zone: f64 = zone_avg.iter().sum();
+    if total_zone == 0.0 { return pick_by_weighted_top(weighted, RED_COUNT); }
+
+    let mut zone_counts = [0usize; 3];
+    let mut assigned = 0usize;
+    for i in 0..3 {
+        zone_counts[i] = (zone_avg[i] / total_zone * RED_COUNT as f64).round() as usize;
+        assigned += zone_counts[i];
+    }
+    while assigned > RED_COUNT {
+        let max_zone = zone_counts.iter().enumerate().max_by_key(|&(_, v)| v).unwrap().0;
+        zone_counts[max_zone] -= 1; assigned -= 1;
+    }
+    while assigned < RED_COUNT {
+        let max_zone = zone_counts.iter().enumerate().max_by_key(|&(_, v)| v).unwrap().0;
+        zone_counts[max_zone] += 1; assigned += 1;
     }
 
-    // 方案2: 热号 + 冷号混合（3热 + 2冷）
-    let hot_take = RED_COUNT - 2;
-    let mut red2: Vec<u8> = stats.red_hot.iter().take(hot_take).cloned().collect();
-    for &n in stats.red_cold.iter().take(2) {
-        if !red2.contains(&n) { red2.push(n); }
+    let mut result = Vec::new();
+    let zones = [(1, ZONE1_END), (ZONE1_END + 1, ZONE2_END), (ZONE2_END + 1, RED_MAX)];
+    for (i, &(start, end)) in zones.iter().enumerate() {
+        let zone_weighted: Vec<(u8, f64)> = weighted.iter()
+            .filter(|(k, _)| **k >= start && **k <= end)
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        let mut sorted = zone_weighted;
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
+        for (k, _) in sorted.into_iter().take(zone_counts[i]) {
+            result.push(k);
+        }
     }
-    // 冷号不足时补热号
-    while red2.len() < RED_COUNT {
-        for &n in &stats.red_hot {
-            if !red2.contains(&n) {
-                red2.push(n);
-                if red2.len() == RED_COUNT { break; }
+    result.sort();
+    result
+}
+
+/// 和值约束：在和值范围内找最优组合
+fn pick_by_sum_constraint(weighted: &HashMap<u8, f64>, sum_avg: f64, sum_stddev: f64) -> Vec<u8> {
+    if let Some(pick) = find_sum_in_range(weighted, sum_avg - sum_stddev * 0.5, sum_avg + sum_stddev * 0.5) {
+        return pick;
+    }
+    if let Some(pick) = find_sum_in_range(weighted, sum_avg - sum_stddev, sum_avg + sum_stddev) {
+        return pick;
+    }
+    pick_by_weighted_top(weighted, RED_COUNT)
+}
+
+/// 在和值范围内找加权最高的组合
+fn find_sum_in_range(weighted: &HashMap<u8, f64>, min_sum: f64, max_sum: f64) -> Option<Vec<u8>> {
+    let candidates = pick_by_weighted_top(weighted, 15);
+    let mut best_pick: Option<Vec<u8>> = None;
+    let mut best_score = f64::MIN;
+
+    for i in 0..candidates.len() {
+        for j in (i+1)..candidates.len() {
+            for k in (j+1)..candidates.len() {
+                for l in (k+1)..candidates.len() {
+                    for m in (l+1)..candidates.len() {
+                        let combo = vec![candidates[i], candidates[j], candidates[k], candidates[l], candidates[m]];
+                        let sum = combo.iter().map(|&n| n as f64).sum::<f64>();
+                        if sum >= min_sum && sum <= max_sum {
+                            let score: f64 = combo.iter().map(|&n| weighted.get(&n).copied().unwrap_or(0.0)).sum();
+                            if score > best_score {
+                                best_score = score;
+                                best_pick = Some(combo);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    red2.sort();
+    best_pick.map(|mut p| { p.sort(); p })
+}
 
-    let mut blue2 = Vec::new();
-    if !stats.blue_hot.is_empty() { blue2.push(stats.blue_hot[0]); }
-    if !stats.blue_cold.is_empty() && blue2.len() < BLUE_COUNT {
-        blue2.push(stats.blue_cold[0]);
+/// 同尾约束：最多2个同尾
+fn pick_by_tail_constraint(weighted: &HashMap<u8, f64>) -> Vec<u8> {
+    let candidates = pick_by_weighted_top(weighted, 15);
+    greedy_pick_with_tail_constraint(&candidates, RED_COUNT)
+}
+
+/// 贪心选号，满足同尾约束
+fn greedy_pick_with_tail_constraint(candidates: &[u8], count: usize) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut tail_count = [0u32; 10];
+
+    for &n in candidates {
+        if result.len() >= count { break; }
+        let tail = (n % 10) as usize;
+        if tail_count[tail] < 2 {
+            result.push(n);
+            tail_count[tail] += 1;
+        }
     }
-    while blue2.len() < BLUE_COUNT {
+    // 不足时放宽约束
+    if result.len() < count {
+        for &n in candidates {
+            if !result.contains(&n) {
+                result.push(n);
+                if result.len() == count { break; }
+            }
+        }
+    }
+    result.sort();
+    result
+}
+
+/// 连号策略：选一组加权最高的相邻号码
+fn pick_by_consecutive(weighted: &HashMap<u8, f64>) -> Vec<u8> {
+    let top15 = pick_by_weighted_top(weighted, 15);
+    let mut best_pair: Option<(u8, u8)> = None;
+    let mut best_pair_score = 0.0;
+
+    for i in 0..top15.len() {
+        for j in (i+1)..top15.len() {
+            if top15[j] == top15[i] + 1 {
+                let score = weighted.get(&top15[i]).copied().unwrap_or(0.0)
+                    + weighted.get(&top15[j]).copied().unwrap_or(0.0);
+                if score > best_pair_score {
+                    best_pair_score = score;
+                    best_pair = Some((top15[i], top15[j]));
+                }
+            }
+        }
+    }
+
+    let mut result = match best_pair {
+        Some((a, b)) => vec![a, b],
+        None => return pick_by_weighted_top(weighted, RED_COUNT),
+    };
+
+    for &n in pick_by_weighted_top(weighted, RED_COUNT + 2).iter() {
+        if !result.contains(&n) {
+            result.push(n);
+            if result.len() == RED_COUNT { break; }
+        }
+    }
+    result.sort();
+    result
+}
+
+/// 蓝球：一奇一偶优先
+fn pick_blue_odd_even(weighted: &HashMap<u8, f64>) -> Vec<u8> {
+    let top5 = pick_by_weighted_top(weighted, 5);
+    let odd: Vec<u8> = top5.iter().filter(|&&n| n % 2 == 1).copied().collect();
+    let even: Vec<u8> = top5.iter().filter(|&&n| n % 2 == 0).copied().collect();
+
+    if !odd.is_empty() && !even.is_empty() {
+        let mut r = vec![odd[0], even[0]];
+        r.sort();
+        return r;
+    }
+    top5.into_iter().take(2).collect::<Vec<_>>()
+}
+
+/// 蓝球：不同尾优先
+fn pick_blue_different_tail(weighted: &HashMap<u8, f64>) -> Vec<u8> {
+    let top = pick_by_weighted_top(weighted, BLUE_COUNT + 2);
+    for i in 0..top.len() {
+        for j in (i+1)..top.len() {
+            if top[i] % 10 != top[j] % 10 {
+                let mut r = vec![top[i], top[j]];
+                r.sort();
+                return r;
+            }
+        }
+    }
+    top.into_iter().take(BLUE_COUNT).collect::<Vec<_>>()
+}
+
+/// 蓝球：近期热度TOP2
+fn pick_blue_hot(_weighted: &HashMap<u8, f64>, recent_hot: &[u8]) -> Vec<u8> {
+    let mut result: Vec<u8> = recent_hot.iter().take(BLUE_COUNT).copied().collect();
+    while result.len() < BLUE_COUNT {
         for i in 1..=BLUE_MAX {
-            if !blue2.contains(&i) { blue2.push(i); break; }
+            if !result.contains(&i) { result.push(i); break; }
         }
     }
-    blue2.sort();
-
-    picks.push(Pick { red: red2, blue: blue2 });
-
-    // 方案3: 按奇偶比和大小比选号
-    let odd_target = (stats.odd_even_ratio * RED_COUNT as f64).round() as usize;
-    let even_target = RED_COUNT - odd_target;
-
-    let odd_nums: Vec<u8> = (1..=RED_MAX).filter(|&n| n % 2 == 1).collect();
-    let even_nums: Vec<u8> = (1..=RED_MAX).filter(|&n| n % 2 == 0).collect();
-
-    let mut odd_candidates: Vec<u8> = odd_nums.iter()
-        .filter(|&&n| stats.red_freq.contains_key(&n))
-        .cloned()
-        .collect();
-    odd_candidates.sort_by_key(|n| -(stats.red_freq.get(n).cloned().unwrap_or(0) as i32));
-
-    let mut even_candidates: Vec<u8> = even_nums.iter()
-        .filter(|&&n| stats.red_freq.contains_key(&n))
-        .cloned()
-        .collect();
-    even_candidates.sort_by_key(|n| -(stats.red_freq.get(n).cloned().unwrap_or(0) as i32));
-
-    let mut red3 = Vec::new();
-    for &n in odd_candidates.iter().take(odd_target) { red3.push(n); }
-    for &n in even_candidates.iter().take(even_target) {
-        if !red3.contains(&n) { red3.push(n); }
-    }
-    while red3.len() < RED_COUNT {
-        for i in 1..=RED_MAX {
-            if !red3.contains(&i) { red3.push(i); break; }
-        }
-    }
-    red3.truncate(RED_COUNT);
-    red3.sort();
-
-    let mut blue3: Vec<(u8, u32)> = stats.blue_freq.iter()
-        .map(|(&k, &v)| (k, v))
-        .collect();
-    blue3.sort_by_key(|&(_, v)| -(v as i32));
-    let blue3: Vec<u8> = blue3.iter().take(BLUE_COUNT).map(|&(k, _)| k).collect();
-    let mut blue3 = blue3;
-    blue3.sort();
-
-    picks.push(Pick { red: red3, blue: blue3 });
-
-    picks
+    result.sort();
+    result
 }
