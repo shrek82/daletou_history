@@ -5,13 +5,39 @@ use scraper::{Html, Selector};
 use crate::error::DaletouError;
 use crate::types::{BallSet, DrawPage, DrawRecord};
 
-/// GB2312 编码实例
+/// GB18030 编码（兼容 GB2312）
 const GB2312: &'static Encoding = encoding_rs::GB18030;
+
+/// 预编译的 CSS 选择器，避免重复解析
+struct Selectors {
+    line: Selector,
+    qs: Selector,
+    date: Selector,
+    red_ball: Selector,
+    blue_ball: Selector,
+    money: Selector,
+    page_text: Selector,
+}
+
+impl Selectors {
+    fn new() -> Self {
+        Self {
+            line: Selector::parse("div.table-line").unwrap(),
+            qs: Selector::parse("div.qs").unwrap(),
+            date: Selector::parse("div.date").unwrap(),
+            red_ball: Selector::parse("div.red-ball").unwrap(),
+            blue_ball: Selector::parse("div.blue-ball").unwrap(),
+            money: Selector::parse("div.money").unwrap(),
+            page_text: Selector::parse("div.page-text").unwrap(),
+        }
+    }
+}
 
 /// 大乐透开奖信息查询客户端
 pub struct Client {
     http: HttpClient,
     base_url: String,
+    selectors: Selectors,
 }
 
 impl Client {
@@ -23,6 +49,7 @@ impl Client {
                 .build()
                 .expect("构建 HTTP 客户端失败"),
             base_url: "https://www.cjcp.cn".to_string(),
+            selectors: Selectors::new(),
         }
     }
 
@@ -46,30 +73,34 @@ impl Client {
     pub fn get_pages(&self, count: u32) -> Result<Vec<DrawRecord>, DaletouError> {
         let first_page = self.get_page(1)?;
         let total = first_page.total_pages.min(count);
-        let mut records = first_page.records;
-
-        for page in 2..=total {
-            let p = self.get_page(page)?;
-            records.extend(p.records);
-        }
-
-        Ok(records)
+        self.collect_records(first_page, 2..=total)
     }
 
     /// 获取指定数量的最新开奖记录（按时间倒序）
     pub fn get_latest_n(&self, n: usize) -> Result<Vec<DrawRecord>, DaletouError> {
         let first_page = self.get_page(1)?;
-        let total_pages = first_page.total_pages;
         // 每页约30条，计算需要请求的页数
-        let pages_needed = ((n + 29) / 30).min(total_pages as usize) as u32;
+        let pages_needed = ((n + 29) / 30).min(first_page.total_pages as usize) as u32;
 
+        let mut records = self.collect_records(first_page, 2..=pages_needed)?;
+        records.truncate(n);
+        Ok(records)
+    }
+
+    /// 收集多页记录的内部方法
+    fn collect_records(
+        &self,
+        first_page: DrawPage,
+        range: std::ops::RangeInclusive<u32>,
+    ) -> Result<Vec<DrawRecord>, DaletouError> {
         let mut records = first_page.records;
-        for page in 2..=pages_needed {
+        records.reserve(range.end().saturating_sub(*range.start()) as usize * 30);
+
+        for page in range {
             let p = self.get_page(page)?;
             records.extend(p.records);
         }
 
-        records.truncate(n);
         Ok(records)
     }
 
@@ -87,7 +118,6 @@ impl Client {
         let resp = self.http.get(url).send()?;
         let bytes = resp.bytes()?;
 
-        // GB18030 解码（兼容 GB2312）
         let cow = GB2312.decode_without_bom_handling_and_without_replacement(&bytes)
             .ok_or_else(|| DaletouError::EncodingError("无效的 GB2312 编码".into()))?;
         Ok(cow.into_owned())
@@ -96,58 +126,31 @@ impl Client {
     /// 解析开奖页面
     fn parse_page(&self, html: &str, current_page: u32) -> Result<DrawPage, DaletouError> {
         let doc = Html::parse_document(html);
-
-        // 解析开奖记录行
-        let line_sel = Selector::parse("div.table-line")
-            .map_err(|e| DaletouError::ParseError(format!("选择器解析失败: {}", e)))?;
-        let qs_sel = Selector::parse("div.qs")
-            .map_err(|e| DaletouError::ParseError(format!("选择器解析失败: {}", e)))?;
-        let date_sel = Selector::parse("div.date")
-            .map_err(|e| DaletouError::ParseError(format!("选择器解析失败: {}", e)))?;
-        let red_sel = Selector::parse("div.red-ball")
-            .map_err(|e| DaletouError::ParseError(format!("选择器解析失败: {}", e)))?;
-        let blue_sel = Selector::parse("div.blue-ball")
-            .map_err(|e| DaletouError::ParseError(format!("选择器解析失败: {}", e)))?;
-        let money_sel = Selector::parse("div.money")
-            .map_err(|e| DaletouError::ParseError(format!("选择器解析失败: {}", e)))?;
+        let s = &self.selectors;
 
         let mut records = Vec::new();
 
-        for line in doc.select(&line_sel) {
+        for line in doc.select(&s.line) {
             // 期号: 从 "大乐透第2026043期开奖结果" 提取数字
-            let qs_text = line
-                .select(&qs_sel)
-                .next()
-                .map(|el| el.text().collect::<String>())
-                .unwrap_or_default();
-            let issue = extract_issue(&qs_text);
+            let issue = extract_issue(&element_text(&line, &s.qs));
 
             // 日期和星期: "2026-04-22(三)"
-            let date_text = line
-                .select(&date_sel)
-                .next()
-                .map(|el| el.text().collect::<String>())
-                .unwrap_or_default();
-            let (date, weekday) = parse_date_weekday(&date_text);
+            let (date, weekday) = parse_date_weekday(&element_text(&line, &s.date));
 
             // 红球
             let red: Vec<u8> = line
-                .select(&red_sel)
-                .filter_map(|el| el.text().collect::<String>().trim().parse::<u8>().ok())
+                .select(&s.red_ball)
+                .filter_map(|el| parse_number(&el))
                 .collect();
 
             // 蓝球
             let blue: Vec<u8> = line
-                .select(&blue_sel)
-                .filter_map(|el| el.text().collect::<String>().trim().parse::<u8>().ok())
+                .select(&s.blue_ball)
+                .filter_map(|el| parse_number(&el))
                 .collect();
 
             // 奖池
-            let prize_pool = line
-                .select(&money_sel)
-                .next()
-                .map(|el| el.text().collect::<String>())
-                .unwrap_or_default();
+            let prize_pool = element_text(&line, &s.money);
 
             records.push(DrawRecord {
                 issue,
@@ -159,7 +162,7 @@ impl Client {
         }
 
         // 解析总页数（从分页控件中获取）
-        let total_pages = parse_total_pages(&doc).unwrap_or(current_page);
+        let total_pages = parse_total_pages(&doc, &s.page_text).unwrap_or(current_page);
 
         Ok(DrawPage {
             current_page,
@@ -175,10 +178,22 @@ impl Default for Client {
     }
 }
 
+/// 提取元素内所有文本并拼接
+fn element_text(line: &scraper::ElementRef, sel: &Selector) -> String {
+    line.select(sel)
+        .next()
+        .map(|el| el.text().collect())
+        .unwrap_or_default()
+}
+
+/// 从元素文本中提取数字
+fn parse_number(el: &scraper::ElementRef) -> Option<u8> {
+    el.text().next()?.trim().parse().ok()
+}
+
 /// 从 "大乐透第2026043期开奖结果" 提取期号 "2026043"
 fn extract_issue(text: &str) -> String {
-    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits
+    text.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
 /// 解析 "2026-04-22(三)" 为 ("2026-04-22", "三")
@@ -186,27 +201,20 @@ fn parse_date_weekday(text: &str) -> (String, String) {
     let text = text.trim();
     if let Some(start) = text.find('(') {
         if let Some(end) = text.find(')') {
-            let date = text[..start].trim().to_string();
-            let weekday = text[start + 1..end].to_string();
-            return (date, weekday);
+            return (text[..start].trim().to_string(), text[start + 1..end].to_string());
         }
     }
     (text.to_string(), String::new())
 }
 
 /// 从分页控件解析总页数
-fn parse_total_pages(doc: &Html) -> Option<u32> {
-    let page_text_sel = Selector::parse("div.page-text").ok()?;
-    let text = doc.select(&page_text_sel).next()?
+fn parse_total_pages(doc: &Html, sel: &Selector) -> Option<u32> {
+    let text = doc.select(sel).next()?
         .first_child()
         .and_then(|n| n.value().as_text())?;
 
     // 文本格式如 "2/96"，提取斜杠后的数字
-    if let Some(pos) = text.find('/') {
-        let after = text[pos + 1..].trim();
-        let digits: String = after.chars().take_while(|&c| c.is_ascii_digit()).collect();
-        digits.parse::<u32>().ok()
-    } else {
-        None
-    }
+    text.find('/')
+        .map(|pos| text[pos + 1..].trim())
+        .and_then(|after| after.chars().take_while(|&c| c.is_ascii_digit()).collect::<String>().parse().ok())
 }
