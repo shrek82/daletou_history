@@ -1,0 +1,18 @@
+[package]
+name = "daletou"
+version = "0.1.0"
+edition = "2024"
+description = "大乐透开奖信息查询，支持实时开奖和历史开奖记录"
+license = "MIT"
+repository = "https://github.com/your-repo/daletou"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+scraper = "0.20"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
