@@ -9,6 +9,16 @@ const BLUE_MAX: u8 = 12;
 const RED_COUNT: usize = 5;
 const BLUE_COUNT: usize = 2;
 
+/// 红球区间划分
+const ZONE1_END: u8 = 12;
+const ZONE2_END: u8 = 24;
+
+/// 加权权重
+const WEIGHT_RECENT10: f64 = 5.0;
+const WEIGHT_RECENT20: f64 = 3.0;
+const WEIGHT_RECENT50: f64 = 2.0;
+const WEIGHT_ALL: f64 = 1.0;
+
 fn main() {
     let cache_path = PathBuf::from("/tmp/daletou_cache.json");
 
@@ -52,22 +62,37 @@ fn main() {
 
 /// 统计分析结果
 struct Stats {
-    /// 红球出现次数 {球号: 次数}
+    /// 红球全量频率
     red_freq: HashMap<u8, u32>,
-    /// 蓝球出现次数 {球号: 次数}
+    /// 蓝球全量频率
     blue_freq: HashMap<u8, u32>,
-    /// 红球近期热号（近50期频率排序）
-    red_hot: Vec<u8>,
-    /// 蓝球近期热号
-    blue_hot: Vec<u8>,
-    /// 红球冷号（近100期未出现）
-    red_cold: Vec<u8>,
-    /// 蓝球冷号
-    blue_cold: Vec<u8>,
-    /// 奇偶比（红球中奇数占比）
-    odd_even_ratio: f64,
-    /// 大小比（红球中大数18-35占比）
-    big_small_ratio: f64,
+    /// 红球各窗口频率 [近10, 近20, 近50]
+    red_window_freq: [HashMap<u8, u32>; 3],
+    /// 蓝球各窗口频率 [近10, 近20, 近50]
+    blue_window_freq: [HashMap<u8, u32>; 3],
+    /// 红球加权得分（近10期x5 + 近20期x3 + 近50期x2 + 全量x1）
+    red_weighted: HashMap<u8, f64>,
+    /// 蓝球加权得分
+    blue_weighted: HashMap<u8, f64>,
+    /// 红球遗漏期数（索引=号码-1）
+    red_omission: Vec<u32>,
+    /// 蓝球遗漏期数
+    blue_omission: Vec<u32>,
+    /// 区间分布 [一区均值, 二区均值, 三区均值]
+    zone_avg: [f64; 3],
+    /// 和值统计 (均值, 标准差)
+    sum_avg: f64,
+    sum_stddev: f64,
+    /// 连号出现率
+    consecutive_rate: f64,
+    /// 平均每期同尾重复数
+    avg_tail_duplicates: f64,
+    /// 奇偶比（红球奇数占比）
+    odd_ratio: f64,
+    /// 大小比（红球大数18-35占比）
+    big_ratio: f64,
+    /// 蓝球近期热号（近50期频率排序）
+    blue_recent_hot: Vec<u8>,
 }
 
 /// 一组推荐号码
