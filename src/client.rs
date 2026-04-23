@@ -1,7 +1,10 @@
 use encoding_rs::Encoding;
 use reqwest::blocking::Client as HttpClient;
 use scraper::{Html, Selector};
-use std::time::Duration;
+use serde::{Serialize, Deserialize};
+use std::fs;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::DaletouError;
 use crate::types::{BallSet, DrawPage, DrawRecord};
@@ -11,6 +14,9 @@ const RECORDS_PER_PAGE: usize = 30;
 
 /// 默认请求间隔
 const DEFAULT_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 默认缓存过期时间（1小时）
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// GB18030 编码（兼容 GB2312）
 const GB2312: &'static Encoding = encoding_rs::GB18030;
@@ -40,6 +46,17 @@ impl Selectors {
     }
 }
 
+/// 缓存数据结构
+#[derive(Serialize, Deserialize)]
+struct CacheData {
+    /// 缓存时间戳（秒）
+    timestamp: u64,
+    /// 缓存的最新期号
+    latest_issue: String,
+    /// 缓存的记录列表（按期号降序）
+    records: Vec<DrawRecord>,
+}
+
 /// 大乐透开奖信息查询客户端
 pub struct Client {
     http: HttpClient,
@@ -47,10 +64,14 @@ pub struct Client {
     selectors: Selectors,
     /// 两次请求之间的最小间隔，防止被封
     request_interval: Duration,
+    /// 缓存过期时间
+    cache_ttl: Duration,
+    /// 缓存文件路径
+    cache_path: Option<PathBuf>,
 }
 
 impl Client {
-    /// 创建新客户端（默认请求间隔 2 秒）
+    /// 创建新客户端（默认请求间隔 2 秒，缓存 1 小时）
     pub fn new() -> Self {
         Self {
             http: HttpClient::builder()
@@ -60,12 +81,29 @@ impl Client {
             base_url: "https://www.cjcp.cn".to_string(),
             selectors: Selectors::new(),
             request_interval: DEFAULT_REQUEST_INTERVAL,
+            cache_ttl: DEFAULT_CACHE_TTL,
+            cache_path: None,
         }
     }
 
     /// 设置请求间隔（防封策略）
     pub fn with_request_interval(mut self, interval: Duration) -> Self {
         self.request_interval = interval;
+        self
+    }
+
+    /// 设置缓存文件路径
+    ///
+    /// 设置后，`get_cached_records` 会优先从缓存读取，
+    /// 仅在缓存过期或需要更新时才发起网络请求。
+    pub fn with_cache_path(mut self, path: PathBuf) -> Self {
+        self.cache_path = Some(path);
+        self
+    }
+
+    /// 设置缓存过期时间
+    pub fn with_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.cache_ttl = ttl;
         self
     }
 
@@ -85,6 +123,37 @@ impl Client {
         self.parse_page(&body, page)
     }
 
+    /// 从缓存或网络获取历史开奖记录
+    ///
+    /// 优先读取缓存，如果缓存过期或缓存中缺少最新数据，
+    /// 则自动从网络更新。
+    pub fn get_cached_records(&self, count: usize) -> Result<Vec<DrawRecord>, DaletouError> {
+        let cache_path = self.cache_path.as_ref().ok_or_else(|| {
+            DaletouError::ParseError("未设置缓存路径，请先调用 with_cache_path".into())
+        })?;
+
+        // 尝试读取缓存
+        if let Some(cache) = self.load_cache(cache_path) {
+            if self.is_cache_valid(&cache) {
+                // 缓存有效，直接从缓存取
+                if cache.records.len() >= count {
+                    let mut records = cache.records;
+                    records.truncate(count);
+                    return Ok(records);
+                }
+            }
+        }
+
+        // 缓存过期或记录不足，从网络获取
+        println!("缓存过期或记录不足，正在从网络获取...");
+        let records = self.get_latest_n(count)?;
+
+        // 写入缓存
+        self.save_cache(cache_path, &records)?;
+
+        Ok(records)
+    }
+
     /// 获取前 N 页的所有开奖记录
     pub fn get_pages(&self, count: u32) -> Result<Vec<DrawRecord>, DaletouError> {
         let first_page = self.get_page(1)?;
@@ -95,7 +164,6 @@ impl Client {
     /// 获取指定数量的最新开奖记录（按时间倒序）
     pub fn get_latest_n(&self, n: usize) -> Result<Vec<DrawRecord>, DaletouError> {
         let first_page = self.get_page(1)?;
-        // 每页约30条，计算需要请求的页数
         let pages_needed = ((n + 29) / 30).min(first_page.total_pages as usize) as u32;
 
         let mut records = self.collect_records(first_page, 2..=pages_needed)?;
@@ -114,7 +182,6 @@ impl Client {
         records.reserve(remaining_pages * RECORDS_PER_PAGE);
 
         for page in range {
-            // 页间延迟，防止被封
             std::thread::sleep(self.request_interval);
             let p = self.get_page(page)?;
             records.extend(p.records);
@@ -150,17 +217,14 @@ impl Client {
         let mut records = Vec::with_capacity(RECORDS_PER_PAGE);
 
         for line in doc.select(&s.line) {
-            // 期号: 从 "大乐透第2026043期开奖结果" 提取数字
             let issue = element_text(&line, &s.qs)
                 .chars()
                 .filter(|c| c.is_ascii_digit())
                 .collect();
 
-            // 日期和星期: "2026-04-22(三)"
             let date_text = element_text(&line, &s.date);
             let (date, weekday) = parse_date_weekday(&date_text);
 
-            // 红球 (5个)
             let mut red = Vec::with_capacity(5);
             for el in line.select(&s.red_ball) {
                 if let Some(n) = parse_number(&el) {
@@ -168,7 +232,6 @@ impl Client {
                 }
             }
 
-            // 蓝球 (2个)
             let mut blue = Vec::with_capacity(2);
             for el in line.select(&s.blue_ball) {
                 if let Some(n) = parse_number(&el) {
@@ -176,7 +239,6 @@ impl Client {
                 }
             }
 
-            // 奖池
             let prize_pool = element_text(&line, &s.money);
 
             records.push(DrawRecord {
@@ -188,7 +250,6 @@ impl Client {
             });
         }
 
-        // 解析总页数（从分页控件中获取）
         let total_pages = parse_total_pages(&doc, &s.page_text).unwrap_or(current_page);
 
         Ok(DrawPage {
@@ -197,12 +258,57 @@ impl Client {
             records,
         })
     }
+
+    /// 加载本地缓存
+    fn load_cache(&self, path: &PathBuf) -> Option<CacheData> {
+        if !path.exists() {
+            return None;
+        }
+        let content = fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// 保存记录到缓存
+    fn save_cache(&self, path: &PathBuf, records: &[DrawRecord]) -> Result<(), DaletouError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| DaletouError::ParseError(format!("创建缓存目录失败: {}", e)))?;
+        }
+
+        let cache = CacheData {
+            timestamp: now_secs(),
+            latest_issue: records.first().map(|r| r.issue.clone()).unwrap_or_default(),
+            records: records.to_vec(),
+        };
+
+        let content = serde_json::to_string_pretty(&cache)
+            .map_err(|e| DaletouError::ParseError(format!("序列化缓存失败: {}", e)))?;
+
+        fs::write(path, content)
+            .map_err(|e| DaletouError::ParseError(format!("写入缓存失败: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// 检查缓存是否有效
+    fn is_cache_valid(&self, cache: &CacheData) -> bool {
+        let elapsed = now_secs().saturating_sub(cache.timestamp);
+        elapsed < self.cache_ttl.as_secs()
+    }
 }
 
 impl Default for Client {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 当前时间戳（秒）
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// 提取元素内所有文本并拼接
