@@ -1,1 +1,0 @@
-/Users/youxiao/projects/daletou_kaijiang/target/debug/libdaletou.rlib: /Users/youxiao/projects/daletou_kaijiang/src/client.rs /Users/youxiao/projects/daletou_kaijiang/src/error.rs /Users/youxiao/projects/daletou_kaijiang/src/lib.rs /Users/youxiao/projects/daletou_kaijiang/src/types.rs
