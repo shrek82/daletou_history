@@ -12,10 +12,10 @@
 /// println!("最新开奖: {} 期", latest.issue);
 /// ```
 
-pub mod client;
-pub mod error;
-pub mod types;
+mod client;
+mod error;
+mod types;
 
 pub use client::Client;
 pub use error::DaletouError;
-pub use types::{DrawRecord, DrawPage, BallSet};
+pub use types::{BallSet, DrawPage, DrawRecord};
