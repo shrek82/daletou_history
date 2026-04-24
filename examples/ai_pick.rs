@@ -159,7 +159,7 @@ fn main() {
 
     let picks = generate_picks(&stats, seed);
 
-    println!("\n===== AI 推荐方案（8组：6组策略 + 2组加权随机，种子={}）=====", seed);
+    println!("\n===== AI 推荐方案（13组：6组策略 + 2组加权随机 + 5组完全随机，种子={}）=====", seed);
     println!("  方案  红球            蓝球    评分  标签");
 
     for (i, pick) in picks.iter().enumerate() {
@@ -513,8 +513,17 @@ fn generate_picks(stats: &Stats, seed: u64) -> Vec<Pick> {
     let blue8 = pick_by_weighted_random(&stats.blue_weighted, 8, BLUE_COUNT, &mut rng_b);
     picks.push(Pick { red: red8, blue: blue8, label: "加权随机B" });
 
+    // 方案9-13: 完全随机（基于操作系统级加密安全随机源）
+    for i in 0..5 {
+        let (red, blue) = pick_completely_random();
+        picks.push(Pick { red, blue, label: BOXES[i] });
+    }
+
     picks
 }
+
+/// 完全随机标签
+const BOXES: [&str; 5] = ["完全随机A", "完全随机B", "完全随机C", "完全随机D", "完全随机E"];
 
 /// 加权随机抽样：从TOP N候选池中按权重随机抽取 count 个号码
 fn pick_by_weighted_random(weighted: &HashMap<u8, f64>, pool_size: usize, count: usize, rng: &mut Rng) -> Vec<u8> {
@@ -755,5 +764,37 @@ fn pick_blue_hot(_weighted: &HashMap<u8, f64>, recent_hot: &[u8]) -> Vec<u8> {
         }
     }
     result.sort();
+    result
+}
+
+/// 完全随机选号：使用操作系统级加密安全随机源
+/// macOS: getentropy() | Linux: getrandom() syscall | Windows: BCryptGenRandom
+fn pick_completely_random() -> (Vec<u8>, Vec<u8>) {
+    let mut red = pick_random_range(1, RED_MAX, RED_COUNT);
+    let blue = pick_random_range(1, BLUE_MAX, BLUE_COUNT);
+    red.sort();
+    (red, blue)
+}
+
+/// 从 [min, max] 中均匀随机选取 count 个不重复的数
+fn pick_random_range(min: u8, max: u8, count: usize) -> Vec<u8> {
+    let range = (max - min + 1) as usize;
+    let mut result = Vec::with_capacity(count);
+    let mut attempts = 0;
+    while result.len() < count && attempts < 1000 {
+        let mut buf = [0u8; 4];
+        getrandom::fill(&mut buf).expect("获取系统随机失败");
+        let idx = u32::from_ne_bytes(buf) as usize % range;
+        let num = min + idx as u8;
+        if !result.contains(&num) {
+            result.push(num);
+        }
+        attempts += 1;
+    }
+    // 兜底：如果随机抽取不足（极小概率），用顺序补足
+    for n in min..=max {
+        if result.len() >= count { break; }
+        if !result.contains(&n) { result.push(n); }
+    }
     result
 }
