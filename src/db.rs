@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use rusqlite::Connection;
 
 use crate::error::DaletouError;
@@ -30,6 +31,16 @@ impl Default for DbConfig {
 pub struct DbClient {
     conn: Arc<Mutex<Connection>>,
     config: DbConfig,
+}
+
+/// 守号方案
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PersistentPick {
+    pub id: i64,
+    pub name: String,
+    pub red: Vec<u8>,
+    pub blue: Vec<u8>,
+    pub created_at: u64,
 }
 
 impl DbClient {
@@ -73,6 +84,23 @@ impl DbClient {
             "CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            )",
+            [],
+        )
+        .map_err(db_error)?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS persistent_picks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                red_1 INTEGER NOT NULL,
+                red_2 INTEGER NOT NULL,
+                red_3 INTEGER NOT NULL,
+                red_4 INTEGER NOT NULL,
+                red_5 INTEGER NOT NULL,
+                blue_1 INTEGER NOT NULL,
+                blue_2 INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
             )",
             [],
         )
@@ -293,6 +321,131 @@ impl DbClient {
             .query_row("SELECT COUNT(*) FROM draw_records", [], |row| row.get(0))
             .map_err(db_error)?;
         Ok(c as usize)
+    }
+
+    // ========================================================================
+    // 守号方案 CRUD
+    // ========================================================================
+
+    /// 新增守号方案
+    pub fn persistent_insert(&self, name: &str, red: &[u8; 5], blue: &[u8; 2]) -> Result<PersistentPick, DaletouError> {
+        let now = now_secs();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO persistent_picks (name, red_1, red_2, red_3, red_4, red_5, blue_1, blue_2, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![name, red[0] as i32, red[1] as i32, red[2] as i32, red[3] as i32, red[4] as i32, blue[0] as i32, blue[1] as i32, now],
+        )
+        .map_err(db_error)?;
+
+        let id = conn.last_insert_rowid();
+        Ok(PersistentPick {
+            id,
+            name: name.to_string(),
+            red: red.to_vec(),
+            blue: blue.to_vec(),
+            created_at: now,
+        })
+    }
+
+    /// 查询所有守号方案
+    pub fn persistent_list(&self) -> Result<Vec<PersistentPick>, DaletouError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, red_1, red_2, red_3, red_4, red_5, blue_1, blue_2, created_at
+             FROM persistent_picks
+             ORDER BY id ASC",
+        )
+        .map_err(db_error)?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(PersistentPick {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                red: vec![
+                    row.get::<_, i32>(2)? as u8,
+                    row.get::<_, i32>(3)? as u8,
+                    row.get::<_, i32>(4)? as u8,
+                    row.get::<_, i32>(5)? as u8,
+                    row.get::<_, i32>(6)? as u8,
+                ],
+                blue: vec![
+                    row.get::<_, i32>(7)? as u8,
+                    row.get::<_, i32>(8)? as u8,
+                ],
+                created_at: row.get(9)?,
+            })
+        })
+        .map_err(db_error)?;
+
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r.map_err(db_error)?);
+        }
+        Ok(result)
+    }
+
+    /// 按期号ID查询守号方案
+    pub fn persistent_get(&self, id: i64) -> Result<Option<PersistentPick>, DaletouError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, red_1, red_2, red_3, red_4, red_5, blue_1, blue_2, created_at
+             FROM persistent_picks
+             WHERE id = ?1",
+        )
+        .map_err(db_error)?;
+
+        let row = stmt.query_row([id], |row| {
+            Ok(PersistentPick {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                red: vec![
+                    row.get::<_, i32>(2)? as u8,
+                    row.get::<_, i32>(3)? as u8,
+                    row.get::<_, i32>(4)? as u8,
+                    row.get::<_, i32>(5)? as u8,
+                    row.get::<_, i32>(6)? as u8,
+                ],
+                blue: vec![
+                    row.get::<_, i32>(7)? as u8,
+                    row.get::<_, i32>(8)? as u8,
+                ],
+                created_at: row.get(9)?,
+            })
+        });
+
+        match row {
+            Ok(pick) => Ok(Some(pick)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(db_error(e)),
+        }
+    }
+
+    /// 更新守号方案
+    pub fn persistent_update(&self, id: i64, name: &str, red: &[u8; 5], blue: &[u8; 2]) -> Result<(), DaletouError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE persistent_picks SET name = ?1, red_1 = ?2, red_2 = ?3, red_3 = ?4,
+             red_4 = ?5, red_5 = ?6, blue_1 = ?7, blue_2 = ?8 WHERE id = ?9",
+            rusqlite::params![name, red[0] as i32, red[1] as i32, red[2] as i32, red[3] as i32, red[4] as i32, blue[0] as i32, blue[1] as i32, id],
+        )
+        .map_err(db_error)?;
+
+        if rows == 0 {
+            return Err(DaletouError::ParseError(format!("守号方案 ID={} 不存在", id)));
+        }
+        Ok(())
+    }
+
+    /// 删除守号方案
+    pub fn persistent_delete(&self, id: i64) -> Result<bool, DaletouError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM persistent_picks WHERE id = ?1",
+            [id],
+        )
+        .map_err(db_error)?;
+        Ok(rows > 0)
     }
 }
 

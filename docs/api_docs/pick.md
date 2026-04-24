@@ -55,7 +55,7 @@ GET /api/pick?strategy=<策略名>
 }
 ```
 
-**固定号码策略** 额外返回 `analysis` 字段：
+**固定号码策略** 格式与策略一致：
 
 ```json
 {
@@ -73,13 +73,6 @@ GET /api/pick?strategy=<策略名>
     "6": 25,
     "7": 40,
     "8": 65
-  },
-  "analysis": {
-    "sum": 121,
-    "odd_even": [2, 3],
-    "big_small": [3, 2],
-    "zones": [1, 1, 3],
-    "tail_dupes": 1
   }
 }
 ```
@@ -111,7 +104,7 @@ GET /api/pick?strategy=<策略名>
 # 获取纯热号推荐
 curl 'http://localhost:8888/api/pick?strategy=hot'
 
-# 获取固定号码分析
+# 获取固定号码推荐
 curl 'http://localhost:8888/api/pick?strategy=fixed'
 
 # 获取完全随机A

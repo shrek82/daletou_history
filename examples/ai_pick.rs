@@ -1,4 +1,6 @@
 mod picks;
+#[path = "handlers_mod/mod.rs"]
+mod handlers;
 
 use picks::{analyze, build_prize_index, compute_prize_stats, generate_picks, is_completely_random, print_analysis, score_pick};
 use picks::scoring::Pick;
@@ -7,7 +9,7 @@ use serde::Serialize;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-use tiny_http::{Server, Response, Header, StatusCode};
+use tiny_http::{Server, Response, Header, StatusCode, Method};
 use daletou::Client;
 
 /// 固定号码：02 22 30 33 34 + 08 12
@@ -121,15 +123,6 @@ impl From<&PrizeStats> for PrizeStatsJson {
 }
 
 #[derive(Serialize)]
-struct FixedAnalysisJson {
-    sum: u8,
-    odd_even: [usize; 2],
-    big_small: [usize; 2],
-    zones: [usize; 3],
-    tail_dupes: usize,
-}
-
-#[derive(Serialize)]
 struct PickJson {
     index: usize,
     red: Vec<u8>,
@@ -137,8 +130,6 @@ struct PickJson {
     score: Option<f64>,
     label: String,
     prize_stats: PrizeStatsJson,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    analysis: Option<FixedAnalysisJson>,
 }
 
 #[derive(Serialize)]
@@ -185,28 +176,30 @@ struct DrawsResponse {
 // ============================================================================
 
 fn print_terminal_output(picks: &[Pick], stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex, seed: u64) {
-    // AI策略推荐
-    println!("\n===== AI 推荐方案（8组：6组策略 + 2组加权随机，种子={}）=====", seed);
+    println!("\n===== AI 推荐方案（种子={}）=====", seed);
     println!("  方案  红球            蓝球    评分  标签           中奖统计");
 
+    let ai_count = picks.iter().position(|p| is_completely_random(p.label)).unwrap_or(picks.len());
+
+    // AI策略推荐（6组策略 + 2组加权随机）
     for (i, pick) in picks.iter().enumerate() {
-        if is_completely_random(pick.label) {
-            break;
-        }
-        let score = score_pick(pick, stats);
+        let score = if is_completely_random(pick.label) {
+            None
+        } else {
+            Some(score_pick(pick, stats))
+        };
         let prize_stats = compute_prize_stats(
             prize_index,
             &pick.red.clone().try_into().expect("红球数量应为5"),
             &pick.blue.clone().try_into().expect("蓝球数量应为2"),
         );
-        print_pick_line(i + 1, pick, Some(score), Some(&prize_stats));
+        print_pick_line(i + 1, pick, score, Some(&prize_stats));
     }
 
-    // 完全随机
+    // 完全随机（5组，评分不适用）
     println!("\n===== 完全随机（5组，基于操作系统级加密随机源，评分不适用）=====");
     println!("  方案  红球            蓝球    标签           中奖统计");
 
-    let ai_count = picks.iter().position(|p| is_completely_random(p.label)).unwrap_or(picks.len());
     for (i, pick) in picks.iter().skip(ai_count).enumerate() {
         let prize_stats = compute_prize_stats(
             prize_index,
@@ -216,8 +209,21 @@ fn print_terminal_output(picks: &[Pick], stats: &picks::stats::Stats, prize_inde
         print_pick_line(i + 1, pick, None, Some(&prize_stats));
     }
 
-    // 固定号码分析
-    print_fixed_number_analysis(stats, prize_index);
+    // 固定号码（格式与策略一致）
+    println!("\n===== 固定号码 =====");
+    println!("  方案  红球            蓝球    评分  标签           中奖统计");
+    let fixed_pick = Pick::new(
+        FIXED_RED.to_vec(),
+        FIXED_BLUE.to_vec(),
+        "固定号码",
+    );
+    let fixed_prize_stats = compute_prize_stats(
+        prize_index,
+        &FIXED_RED,
+        &FIXED_BLUE,
+    );
+    let fixed_score = score_pick(&fixed_pick, stats);
+    print_pick_line(1, &fixed_pick, Some(fixed_score), Some(&fixed_prize_stats));
 }
 
 fn print_pick_line(index: usize, pick: &Pick, score: Option<f64>, prize_stats: Option<&PrizeStats>) {
@@ -240,57 +246,11 @@ fn print_pick_line(index: usize, pick: &Pick, score: Option<f64>, prize_stats: O
     println!();
 }
 
-fn print_fixed_number_analysis(stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex) {
-    use picks::score_pick;
-
-    let pick = Pick::new(
-        FIXED_RED.to_vec(),
-        FIXED_BLUE.to_vec(),
-        "固定号码",
-    );
-
-    let score = score_pick(&pick, stats);
-    let prize_stats = compute_prize_stats(prize_index, &FIXED_RED, &FIXED_BLUE);
-
-    let sum: u8 = FIXED_RED.iter().sum();
-    let odd_count = FIXED_RED.iter().filter(|&&n| n % 2 == 1).count();
-    let big_count = FIXED_RED.iter().filter(|&&n| n >= 18).count();
-
-    let mut zones = [0usize; 3];
-    for &n in &FIXED_RED {
-        if n <= 12 { zones[0] += 1; }
-        else if n <= 24 { zones[1] += 1; }
-        else { zones[2] += 1; }
-    }
-
-    println!("\n===== 固定号码分析 =====");
-    println!("  号码: {:02} {:02} {:02} {:02} {:02} + {:02} {:02}  评分: {:.1}",
-        FIXED_RED[0], FIXED_RED[1], FIXED_RED[2], FIXED_RED[3], FIXED_RED[4],
-        FIXED_BLUE[0], FIXED_BLUE[1], score);
-    println!("  中奖统计: {}", prize_stats.display());
-    println!("  和值: {}  奇偶比: {}/{}  大小比: {}/{}",
-        sum, odd_count, 5 - odd_count, big_count, 5 - big_count);
-    println!("  区间分布: {}-{}-{}  同尾组数: {}",
-        zones[0], zones[1], zones[2], count_tail_dupes(&FIXED_RED));
-}
-
-fn count_tail_dupes(red: &[u8; 5]) -> usize {
-    let mut tails = *red;
-    tails.sort();
-    let mut dupes = 0;
-    for i in 1..tails.len() {
-        if tails[i] % 10 == tails[i - 1] % 10 {
-            dupes += 1;
-        }
-    }
-    dupes
-}
-
 // ============================================================================
 // 构建JSON响应数据
 // ============================================================================
 
-fn build_pick_json(index: usize, pick: &Pick, stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex, include_analysis: bool) -> PickJson {
+fn build_pick_json(index: usize, pick: &Pick, stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex) -> PickJson {
     let score = if is_completely_random(pick.label) {
         None
     } else {
@@ -302,27 +262,6 @@ fn build_pick_json(index: usize, pick: &Pick, stats: &picks::stats::Stats, prize
         &pick.blue.clone().try_into().expect("蓝球数量应为2"),
     );
 
-    let analysis = if include_analysis {
-        let sum: u8 = pick.red.iter().sum();
-        let odd_count = pick.red.iter().filter(|&&n| n % 2 == 1).count();
-        let big_count = pick.red.iter().filter(|&&n| n >= 18).count();
-        let mut zones = [0usize; 3];
-        for &n in &pick.red {
-            if n <= 12 { zones[0] += 1; }
-            else if n <= 24 { zones[1] += 1; }
-            else { zones[2] += 1; }
-        }
-        Some(FixedAnalysisJson {
-            sum,
-            odd_even: [odd_count, 5 - odd_count],
-            big_small: [big_count, 5 - big_count],
-            zones,
-            tail_dupes: count_tail_dupes_vec(&pick.red),
-        })
-    } else {
-        None
-    };
-
     PickJson {
         index,
         red: pick.red.clone(),
@@ -330,20 +269,7 @@ fn build_pick_json(index: usize, pick: &Pick, stats: &picks::stats::Stats, prize
         score,
         label: pick.label.to_string(),
         prize_stats: (&prize_stats).into(),
-        analysis,
     }
-}
-
-fn count_tail_dupes_vec(red: &[u8]) -> usize {
-    let mut tails: Vec<u8> = red.iter().copied().collect();
-    tails.sort();
-    let mut dupes = 0;
-    for i in 1..tails.len() {
-        if tails[i] % 10 == tails[i - 1] % 10 {
-            dupes += 1;
-        }
-    }
-    dupes
 }
 
 fn build_picks_response(picks: &[Pick], stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex, seed: u64, records_count: usize) -> PicksResponse {
@@ -353,15 +279,15 @@ fn build_picks_response(picks: &[Pick], stats: &picks::stats::Stats, prize_index
     let ai_count = picks.iter().position(|p| is_completely_random(p.label)).unwrap_or(picks.len());
 
     for (i, pick) in picks.iter().enumerate().take(ai_count) {
-        strategies.push(build_pick_json(i + 1, pick, stats, prize_index, false));
+        strategies.push(build_pick_json(i + 1, pick, stats, prize_index));
     }
     for (i, pick) in picks.iter().skip(ai_count).enumerate() {
-        random.push(build_pick_json(i + 1, pick, stats, prize_index, false));
+        random.push(build_pick_json(i + 1, pick, stats, prize_index));
     }
 
     // 固定号码
     let fixed_pick = Pick::new(FIXED_RED.to_vec(), FIXED_BLUE.to_vec(), "固定号码");
-    let fixed_json = build_pick_json(0, &fixed_pick, stats, prize_index, true);
+    let fixed_json = build_pick_json(1, &fixed_pick, stats, prize_index);
 
     PicksResponse {
         seed,
@@ -390,27 +316,42 @@ fn run_server(port: u16, stats: picks::stats::Stats, prize_index: picks::prize::
         });
 
     println!("HTTP服务已启动: http://0.0.0.0:{}", port);
-    println!("  GET /api/picks              - 返回全部推荐");
-    println!("  GET /api/pick?strategy=hot  - 返回指定策略");
-    println!("  GET /api/draws?page=1&page_size=20 - 分页查询开奖记录");
-    println!("  GET /api/draws?issue=26001           - 按期号查询");
-    println!("  GET /health                 - 健康检查");
+    println!("  GET  /api/picks                             - 返回全部推荐");
+    println!("  GET  /api/pick?strategy=hot                 - 返回指定策略");
+    println!("  GET  /api/draws?page=1&page_size=20         - 分页查询开奖记录");
+    println!("  GET  /api/draws?issue=26001                 - 按期号查询");
+    println!("  GET  /api/persistent                        - 守号方案列表");
+    println!("  POST /api/persistent                        - 新增守号方案");
+    println!("  GET  /api/persistent/<id>                   - 查询守号方案");
+    println!("  PUT  /api/persistent/<id>                   - 修改守号方案");
+    println!("  DELETE /api/persistent/<id>                 - 删除守号方案");
+    println!("  GET  /api/persistent/<id>/analysis          - 守号方案分析");
+    println!("  GET  /api/persistent/<id>/history?n=30      - 守号结果查询");
+    println!("  GET  /health                                - 健康检查");
     println!("  Ctrl+C 停止服务");
 
-    for request in server.incoming_requests() {
+    for mut request in server.incoming_requests() {
         let state = server_state.lock().unwrap();
         let (stats, prize_index, records_count) = &*state;
         let db_guard = db_state.lock().unwrap();
 
         let url = request.url().to_string();
-        let response = handle_request(&url, stats, prize_index, *records_count, &db_guard);
+        let method = request.method().clone();
+        let mut body = Vec::new();
+        let _ = std::io::Read::read_to_end(request.as_reader(), &mut body);
+        let response = handle_request(&url, &method, &body, stats, prize_index, *records_count, &db_guard);
 
         let _ = request.respond(response);
     }
 }
 
-fn handle_request(url: &str, stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex, records_count: usize, db: &daletou::DbClient) -> Response<Cursor<Vec<u8>>> {
+fn handle_request(url: &str, method: &Method, body: &[u8], stats: &picks::stats::Stats, prize_index: &picks::prize::PrizeIndex, records_count: usize, db: &daletou::DbClient) -> Response<Cursor<Vec<u8>>> {
     let path = url.split('?').next().unwrap_or("/");
+
+    // 守号方案路由
+    if path.starts_with("/api/persistent") {
+        return handlers::handle_persistent(url, method, body, db, Some(stats), Some(prize_index));
+    }
 
     match path {
         "/health" => json_response(200, &HealthResponse {
@@ -443,7 +384,7 @@ fn handle_request(url: &str, stats: &picks::stats::Stats, prize_index: &picks::p
                             FIXED_BLUE.to_vec(),
                             "固定号码",
                         );
-                        let pj = build_pick_json(1, &pick, stats, prize_index, true);
+                        let pj = build_pick_json(1, &pick, stats, prize_index);
                         return json_response(200, &pj);
                     }
 
@@ -458,7 +399,7 @@ fn handle_request(url: &str, stats: &picks::stats::Stats, prize_index: &picks::p
 
                             match pick {
                                 Some(p) => {
-                                    let pj = build_pick_json(1, p, stats, prize_index, key == "fixed");
+                                    let pj = build_pick_json(1, p, stats, prize_index);
                                     json_response(200, &pj)
                                 }
                                 None => json_error(404, format!("策略 '{}' 不存在", key)),
@@ -470,7 +411,7 @@ fn handle_request(url: &str, stats: &picks::stats::Stats, prize_index: &picks::p
                 None => json_error(400, "缺少 strategy 参数，例如: /api/pick?strategy=hot".to_string()),
             }
         }
-        _ => json_error(404, "未找到该路径。可用: /api/picks, /api/pick?strategy=<name>, /health".to_string()),
+        _ => json_error(404, "未找到该路径。可用: /api/picks, /api/pick?strategy=<name>, /api/draws, /health".to_string()),
     }
 }
 

@@ -17,6 +17,7 @@
 | [开奖记录查询](draws.md) | `GET /api/draws` 分页查询 / 按期号查询 |
 | [全部推荐](picks.md) | `GET /api/picks` 返回全部 AI 推荐方案 |
 | [指定策略推荐](pick.md) | `GET /api/pick?strategy=<name>` 返回单个策略方案 |
+| [守号方案](persistent.md) | 守号方案的增删改查、分析、结果查询 |
 
 ## 接口索引
 
@@ -26,6 +27,7 @@
 | GET | `/api/draws` | [开奖记录查询](draws.md) |
 | GET | `/api/picks` | [全部推荐](picks.md) |
 | GET | `/api/pick?strategy=<name>` | [指定策略推荐](pick.md) |
+| POST/GET/PUT/DELETE | `/api/persistent[/<id>]` | [守号方案](persistent.md) |
 
 ## 通用错误响应
 

@@ -126,13 +126,6 @@ impl Client {
         let interval = self.request_interval;
 
         let handle = std::thread::spawn(move || {
-            // 数据库为空时立即触发初始化
-            if db_clone.count().unwrap_or(0) == 0 {
-                if let Err(e) = Self::auto_update_page_once(&db_clone, &base_url, interval) {
-                    eprintln!("后台初始化爬取失败: {}", e);
-                }
-            }
-
             loop {
                 if stop_clone.load(Ordering::Relaxed) {
                     break;
@@ -291,14 +284,12 @@ impl Client {
             return db.get_latest_n(count);
         }
 
-        // 数据库有数据，检查是否需要更新
-        if db.should_crawl() {
-            println!("[爬取] 数据已过期（当前 {} 条），正在从网络获取最新一期...", current_count);
-            let first_page = self.get_page(1)?;
-            println!("[爬取] 第 1 页完成，解析到 {} 条记录（共 {} 页）", first_page.records.len(), first_page.total_pages);
-            db.update_latest(&first_page.records)?;
-            println!("[爬取] 数据库已更新");
-        }
+        // 数据库有数据，立即增量更新第1页
+        println!("[爬取] 当前数据库 {} 条记录，正在增量更新第 1 页...", current_count);
+        let first_page = self.get_page(1)?;
+        println!("[爬取] 第 1 页完成，解析到 {} 条记录（共 {} 页）", first_page.records.len(), first_page.total_pages);
+        db.update_latest(&first_page.records)?;
+        println!("[爬取] 数据库已更新");
 
         let records = db.get_latest_n(count)?;
         println!("[爬取] 从数据库加载 {} 条记录", records.len());

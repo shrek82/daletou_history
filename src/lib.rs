@@ -18,6 +18,6 @@ mod error;
 mod types;
 
 pub use client::{AutoUpdateHandle, Client};
-pub use db::{DbClient, DbConfig};
+pub use db::{DbClient, DbConfig, PersistentPick};
 pub use error::DaletouError;
 pub use types::{BallSet, DrawPage, DrawRecord};

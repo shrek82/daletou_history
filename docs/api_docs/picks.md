@@ -56,7 +56,7 @@ GET /api/picks
     }
   ],
   "fixed": {
-    "index": 0,
+    "index": 1,
     "red": [2, 22, 30, 33, 34],
     "blue": [8, 12],
     "score": 65.2,
@@ -70,13 +70,6 @@ GET /api/picks
       "6": 25,
       "7": 40,
       "8": 65
-    },
-    "analysis": {
-      "sum": 121,
-      "odd_even": [2, 3],
-      "big_small": [3, 2],
-      "zones": [1, 1, 3],
-      "tail_dupes": 1
     }
   }
 }
@@ -88,7 +81,7 @@ GET /api/picks
 | `records_count` | integer | 用于分析的历史记录条数 |
 | `strategies` | array | 6 组策略推荐方案 |
 | `random` | array | 5 组完全随机方案 |
-| `fixed` | object | 固定号码分析（02 22 30 33 34 + 08 12） |
+| `fixed` | object | 固定号码方案（02 22 30 33 34 + 08 12），格式与 Pick 对象一致 |
 
 ### Pick 对象
 
@@ -100,7 +93,6 @@ GET /api/picks
 | `score` | float \| null | 评分，完全随机方案为 null |
 | `label` | string | 策略标签 |
 | `prize_stats` | object | 中奖统计 |
-| `analysis` | object \| null | 详细分析，仅固定号码时返回 |
 
 ### prize_stats 对象
 
@@ -116,16 +108,6 @@ GET /api/picks
 | `6` | 六等奖（4+0）命中次数 |
 | `7` | 七等奖（3+2）命中次数 |
 | `8` | 八等奖（2+2 或 3+1）命中次数 |
-
-### analysis 对象（仅 fixed 策略）
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `sum` | integer | 红球和值 |
-| `odd_even` | [integer, integer] | 奇偶比 [奇数个数, 偶数个数] |
-| `big_small` | [integer, integer] | 大小比 [>=18 个数, <18 个数] |
-| `zones` | [integer, integer, integer] | 区间分布 [1-12, 13-24, 25-35] |
-| `tail_dupes` | integer | 同尾组数 |
 
 ## 策略列表
 
