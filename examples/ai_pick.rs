@@ -159,7 +159,7 @@ fn main() {
 
     let picks = generate_picks(&stats, seed);
 
-    println!("\n===== AI 推荐方案（8组：6组策略 + 2组随机，种子={}）=====", seed);
+    println!("\n===== AI 推荐方案（8组：6组策略 + 2组加权随机，种子={}）=====", seed);
     println!("  方案  红球            蓝球    评分  标签");
 
     for (i, pick) in picks.iter().enumerate() {
@@ -505,13 +505,13 @@ fn generate_picks(stats: &Stats, seed: u64) -> Vec<Pick> {
     let mut rng_a = Rng::new(seed);
     let red7 = pick_by_weighted_random(&stats.red_weighted, 20, RED_COUNT, &mut rng_a);
     let blue7 = pick_by_weighted_random(&stats.blue_weighted, 8, BLUE_COUNT, &mut rng_a);
-    picks.push(Pick { red: red7, blue: blue7, label: "随机A" });
+    picks.push(Pick { red: red7, blue: blue7, label: "加权随机A" });
 
     // 方案8: 随机扰动 B -- 不同种子
     let mut rng_b = Rng::new(seed.wrapping_add(1));
     let red8 = pick_by_weighted_random(&stats.red_weighted, 20, RED_COUNT, &mut rng_b);
     let blue8 = pick_by_weighted_random(&stats.blue_weighted, 8, BLUE_COUNT, &mut rng_b);
-    picks.push(Pick { red: red8, blue: blue8, label: "随机B" });
+    picks.push(Pick { red: red8, blue: blue8, label: "加权随机B" });
 
     picks
 }
