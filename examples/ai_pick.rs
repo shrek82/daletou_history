@@ -769,32 +769,30 @@ fn pick_blue_hot(_weighted: &HashMap<u8, f64>, recent_hot: &[u8]) -> Vec<u8> {
 
 /// 完全随机选号：使用操作系统级加密安全随机源
 /// macOS: getentropy() | Linux: getrandom() syscall | Windows: BCryptGenRandom
+/// 模拟真实摇奖过程：Fisher-Yates 洗牌，从小到大排列
 fn pick_completely_random() -> (Vec<u8>, Vec<u8>) {
-    let mut red = pick_random_range(1, RED_MAX, RED_COUNT);
-    let blue = pick_random_range(1, BLUE_MAX, BLUE_COUNT);
-    red.sort();
+    let red = fisher_yates_sample(1, RED_MAX, RED_COUNT);
+    let blue = fisher_yates_sample(1, BLUE_MAX, BLUE_COUNT);
     (red, blue)
 }
 
-/// 从 [min, max] 中均匀随机选取 count 个不重复的数
-fn pick_random_range(min: u8, max: u8, count: usize) -> Vec<u8> {
+/// Fisher-Yates 洗牌：从 [min, max] 中均匀随机抽取 count 个不重复的数，返回已排序结果
+fn fisher_yates_sample(min: u8, max: u8, count: usize) -> Vec<u8> {
     let range = (max - min + 1) as usize;
-    let mut result = Vec::with_capacity(count);
-    let mut attempts = 0;
-    while result.len() < count && attempts < 1000 {
+    // 初始化球池
+    let mut pool: Vec<u8> = (min..=max).collect();
+
+    // Fisher-Yates 洗牌：只洗前 count 个位置
+    for i in 0..count {
+        let remaining = range - i;
         let mut buf = [0u8; 4];
         getrandom::fill(&mut buf).expect("获取系统随机失败");
-        let idx = u32::from_ne_bytes(buf) as usize % range;
-        let num = min + idx as u8;
-        if !result.contains(&num) {
-            result.push(num);
-        }
-        attempts += 1;
+        let j = i + (u32::from_ne_bytes(buf) as usize % remaining);
+        pool.swap(i, j);
     }
-    // 兜底：如果随机抽取不足（极小概率），用顺序补足
-    for n in min..=max {
-        if result.len() >= count { break; }
-        if !result.contains(&n) { result.push(n); }
-    }
+
+    // 取前 count 个，从小到大排序
+    let mut result: Vec<u8> = pool.into_iter().take(count).collect();
+    result.sort();
     result
 }
