@@ -13,9 +13,11 @@
 /// ```
 
 mod client;
+mod db;
 mod error;
 mod types;
 
-pub use client::Client;
+pub use client::{AutoUpdateHandle, Client};
+pub use db::{DbClient, DbConfig};
 pub use error::DaletouError;
 pub use types::{BallSet, DrawPage, DrawRecord};
