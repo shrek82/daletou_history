@@ -1,7 +1,7 @@
 use daletou::{Client, DrawRecord};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// 红球范围 1-35，蓝球范围 1-12
 const RED_MAX: u8 = 35;
@@ -18,6 +18,51 @@ const WEIGHT_RECENT10: f64 = 5.0;
 const WEIGHT_RECENT20: f64 = 3.0;
 const WEIGHT_RECENT50: f64 = 2.0;
 const WEIGHT_ALL: f64 = 1.0;
+
+/// 线性同余随机数生成器（种子可控，可复现）
+struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        // SplitMix64 初始化
+        Self { state: seed.wrapping_add(0x9E3779B97F4A7C15) }
+    }
+
+    /// 生成 [0, 1) 之间的 f64
+    fn next_f64(&mut self) -> f64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state ^= self.state >> 30;
+        (self.state >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// 加权随机抽样：按权重比例从 items 中抽取 count 个不重复的元素
+    fn weighted_sample(&mut self, items: &[(u8, f64)], count: usize) -> Vec<u8> {
+        let mut result = Vec::new();
+        let mut remaining = items.to_vec();
+
+        while result.len() < count && !remaining.is_empty() {
+            let total: f64 = remaining.iter().map(|(_, w)| w.max(0.001)).sum();
+            let mut r = self.next_f64() * total;
+            let mut chosen_idx = 0;
+
+            for (i, (_, w)) in remaining.iter().enumerate() {
+                r -= w.max(0.001);
+                if r <= 0.0 {
+                    chosen_idx = i;
+                    break;
+                }
+                chosen_idx = i;
+            }
+
+            result.push(remaining[chosen_idx].0);
+            remaining.remove(chosen_idx);
+        }
+        result.sort();
+        result
+    }
+}
 
 /// 计算方案评分（0-100）
 fn score_pick(pick: &Pick, stats: &Stats) -> f64 {
@@ -89,7 +134,7 @@ fn score_blue_pick(pick: &Pick, stats: &Stats) -> f64 {
 }
 
 fn main() {
-    let cache_path = PathBuf::from("/tmp/daletou_cache.json");
+    let cache_path = PathBuf::from("/tmp/daletou_cache300.json");
 
     let client = Client::new()
         .with_cache_path(cache_path)
@@ -106,9 +151,15 @@ fn main() {
     let stats = analyze(&records);
     print_analysis(&stats, &records);
 
-    let picks = generate_picks(&stats);
+    // 用当前时间戳做随机种子
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
-    println!("\n===== AI 推荐方案（6组）=====");
+    let picks = generate_picks(&stats, seed);
+
+    println!("\n===== AI 推荐方案（8组：6组策略 + 2组随机，种子={}）=====", seed);
     println!("  方案  红球            蓝球    评分  标签");
 
     for (i, pick) in picks.iter().enumerate() {
@@ -416,9 +467,9 @@ fn print_analysis(stats: &Stats, records: &[DrawRecord]) {
     println!("同尾分析: 平均 {:.1} 个同尾重复/期", stats.avg_tail_duplicates);
 }
 
-/// 生成多组推荐号码
-fn generate_picks(stats: &Stats) -> Vec<Pick> {
-    let mut picks = Vec::with_capacity(6);
+/// 生成多组推荐号码（6组确定性 + 2组随机扰动）
+fn generate_picks(stats: &Stats, seed: u64) -> Vec<Pick> {
+    let mut picks = Vec::with_capacity(8);
 
     // 方案1: 纯加权热号
     let red1 = pick_by_weighted_top(&stats.red_weighted, RED_COUNT);
@@ -450,7 +501,28 @@ fn generate_picks(stats: &Stats) -> Vec<Pick> {
     let blue6 = pick_blue_hot(&stats.blue_weighted, &stats.blue_recent_hot);
     picks.push(Pick { red: red6, blue: blue6, label: "连号策略" });
 
+    // 方案7: 随机扰动 A -- 从TOP20候选中按权重随机抽样
+    let mut rng_a = Rng::new(seed);
+    let red7 = pick_by_weighted_random(&stats.red_weighted, 20, RED_COUNT, &mut rng_a);
+    let blue7 = pick_by_weighted_random(&stats.blue_weighted, 8, BLUE_COUNT, &mut rng_a);
+    picks.push(Pick { red: red7, blue: blue7, label: "随机A" });
+
+    // 方案8: 随机扰动 B -- 不同种子
+    let mut rng_b = Rng::new(seed.wrapping_add(1));
+    let red8 = pick_by_weighted_random(&stats.red_weighted, 20, RED_COUNT, &mut rng_b);
+    let blue8 = pick_by_weighted_random(&stats.blue_weighted, 8, BLUE_COUNT, &mut rng_b);
+    picks.push(Pick { red: red8, blue: blue8, label: "随机B" });
+
     picks
+}
+
+/// 加权随机抽样：从TOP N候选池中按权重随机抽取 count 个号码
+fn pick_by_weighted_random(weighted: &HashMap<u8, f64>, pool_size: usize, count: usize, rng: &mut Rng) -> Vec<u8> {
+    let candidates = pick_by_weighted_top(weighted, pool_size);
+    let items: Vec<(u8, f64)> = candidates.iter()
+        .map(|&n| (n, *weighted.get(&n).unwrap_or(&0.0)))
+        .collect();
+    rng.weighted_sample(&items, count)
 }
 
 /// 按加权得分TOP N选号
