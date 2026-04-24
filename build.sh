@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-BINARY="target/release/examples/ai_pick"
+BINARY="target/release/daletou"
 
 # 编译
-echo "正在编译 ai_pick (release)..."
-cargo build --example ai_pick --release
+echo "正在编译 (release)..."
+cargo build --release
 echo "编译成功: $BINARY"
 
 # 运行模式

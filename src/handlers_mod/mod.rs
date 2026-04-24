@@ -1,8 +1,8 @@
 //! 守号方案 HTTP 处理函数
 
-use super::picks;
-use super::picks::scoring::Pick;
-use super::picks::prize::PrizeStats;
+use crate::picks;
+use crate::picks::scoring::Pick;
+use crate::picks::prize::PrizeStats;
 use picks::{compute_prize_stats, score_pick};
 use picks::stats::Stats;
 use picks::prize::PrizeIndex;

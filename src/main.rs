@@ -1,6 +1,5 @@
+mod handlers_mod;
 mod picks;
-#[path = "handlers_mod/mod.rs"]
-mod handlers;
 
 use picks::{analyze, build_prize_index, compute_prize_stats, generate_picks, is_completely_random, print_analysis, score_pick};
 use picks::scoring::Pick;
@@ -350,7 +349,7 @@ fn handle_request(url: &str, method: &Method, body: &[u8], stats: &picks::stats:
 
     // 守号方案路由
     if path.starts_with("/api/persistent") {
-        return handlers::handle_persistent(url, method, body, db, Some(stats), Some(prize_index));
+        return handlers_mod::handle_persistent(url, method, body, db, Some(stats), Some(prize_index));
     }
 
     match path {
